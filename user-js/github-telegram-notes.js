@@ -7,17 +7,14 @@
 // @match        https://github.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      api.telegram.org
 // ==/UserScript==
 
 (function () {
   "use strict";
-
-  // === CONFIG ===
-  //const TELEGRAM_HISTORY_TOKEN = "NNN:XXXX"; // Токен бота для чтения истории
-  //const TELEGRAM_ACTION_TOKEN = "NNN:XXXX";  // Токен бота для отправки сообщений
-  //const TELEGRAM_CHAT_ID = "-100NNN";        // ID чата/канала
-  const TELEGRAM_LIMIT = 100;                  // Максимальное количество загружаемых сообщений
 
   GM_addStyle(`
     .gh-note-btn {
@@ -34,6 +31,144 @@
       display: inline;
     }
   `);
+
+
+  class TelegramConfig {
+    static _key = 'telegramConfig';
+
+    /**
+     * Читает конфигурацию
+     * @return {Object}
+     */
+    static load() {
+      return GM_getValue(this._key)
+    }
+
+    /**
+     * Сохраняет конфигурацию
+     * @param {Object} config
+     * @param {string} config.historyToken
+     * @param {string} config.actionToken
+     * @param {string} config.chatId
+     * @param {string} config.limit
+     */
+    static save(config) {
+      if (!config.historyToken || !config.actionToken || !config.chatId) {
+        throw new Error("Не указаны обязательные поля конфига");
+      }
+      GM_setValue(this._key, config)
+    }
+
+    /**
+     * Удаляет конфигурацию
+     */
+    static clear() {
+      GM_setValue(this._key, undefined)
+    }
+  }
+
+  function addConfigMenu() {
+    GM_registerMenuCommand("Настроить Telegram", showConfigForm);
+    GM_registerMenuCommand("Очистить кофигурацию Telegram", () => {
+      if (confirm("⚠️ Delete ALL saved Telegram tokens and other settings?\n(This cannot be undone!)")) {
+        TelegramConfig.clear();
+      }
+    });  
+  }
+
+  function showConfigForm() {
+    return new Promise((resolve, reject) => {
+      const config = TelegramConfig.load();
+      const modal = document.createElement('div');
+      modal.className = 'Box f6 rounded-1 text-normal color-shadow-small';
+      modal.style = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        /*background: white;*/
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 0 20px rgba(0,0,0,0.2);
+        z-index: 99999;
+        width: 80%;
+        max-width: 400px;
+      `;
+
+      modal.innerHTML = `
+        <h3>Настройки GitHub Notes</h3>
+        <form id="auth-form">
+
+          <label>
+            Токен чтения:
+            <input type="input"
+                   value="${config?.historyToken || ''}"
+                   placeholder="1234567890:ABCdef..."
+                   pattern="^\\d{9,10}:[A-Za-z0-9_\\-]{35}$"
+                   required>
+          </label><br/>
+
+          <label>
+            Токен отправки:
+            <input type="input"
+                   value="${config?.actionToken || ''}"
+                   placeholder="1234567890:ABCdef..."
+                   pattern="^\\d{9,10}:[A-Za-z0-9_\\-]{35}$"
+                   required>
+          </label><br/>
+
+          <label>
+            ID чата:
+            <input type="text"
+                   value="${config?.chatId || ''}"
+                   placeholder="-1001234567890"
+                   pattern="^-100\\d+$"
+                   required>
+          </label><br/>
+
+          <label>
+            Лимит:
+            <input type="number"
+                   value="${config?.limit || 50}"
+                   min="1" max="100"
+                   required>
+          </label><br/>
+
+          <div class="buttons">
+            <button type="submit">Сохранить</button>
+            <button type="button" id="cancel-btn">Отмена</button>
+          </div>
+        </form>
+      `;
+
+      modal.querySelector('form').onsubmit = (e) => {
+        e.preventDefault();
+        const inputs = e.target.elements;
+
+        const config = {
+          historyToken: inputs[0].value.trim(),
+          actionToken: inputs[1].value.trim(),
+          chatId: inputs[2].value.trim(),
+          limit: parseInt(inputs[3].value.trim()),
+        };
+
+        TelegramConfig.save(config);
+        console.log('Настройки Telegram сохранены');
+
+        modal.remove();
+        resolve(config);
+      };
+
+      modal.querySelector('#cancel-btn').addEventListener('click', () => {
+        modal.remove();
+        reject(new Error('Настройки Telegram отменены'));
+      });
+
+      document.body.appendChild(modal);
+    });
+  }
+
+  /*------------------------------------------------------------*/
 
   /**
    * Представляет заметку к строке кода в GitHub
@@ -663,7 +798,7 @@
       if (!this._isValidLineNumberDiv(div)) return;
 
       const lineNumber = parseInt(div.getAttribute("data-line-number"), 10);
-      if (lineNumber <= 0) return;
+      if (isNaN(lineNumber) || lineNumber <= 0) return;
 
       let button = div.querySelector(`.${LineNoteButtons.buttonClass}`);
       if (!button) {
@@ -1040,17 +1175,19 @@
   }
 
   async function main() {
+    // Добавляем меню для смены настроек
+    addConfigMenu();
+
     console.log("GitHub Notes to Telegram активен");
+
+    let config = TelegramConfig.load();
+    if (!config?.historyToken) {
+      config = await showConfigForm();
+    }
 
     // Зависимости
     const cache = new HierarchicalNoteCache();
-    const storage = new TelegramStorage({
-      historyToken: TELEGRAM_HISTORY_TOKEN,
-      actionToken: TELEGRAM_ACTION_TOKEN,
-      chatId: TELEGRAM_CHAT_ID,
-      limit: TELEGRAM_LIMIT,
-    });
-
+    const storage = new TelegramStorage(config);
     const manager = new NoteManager(storage, cache);
 
     // Фоновая загрузка
