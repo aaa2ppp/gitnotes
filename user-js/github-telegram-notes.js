@@ -18,17 +18,11 @@
 
   GM_addStyle(`
     .gh-note-btn {
-      display: none;
-      margin: 0 1px;
-      font-size: 9px;
-      color: #0969da;
-      cursor: pointer;
-      user-select: none;
-    }
-    .react-line-number:hover .gh-note-btn,
-    .addition .gh-note-btn,
-    .deletion .gh-note-btn {
       display: inline;
+      margin-left: 0 1px;
+      cursor: pointer;
+      vertical-align: middle;
+      user-select: none;
     }
   `);
 
