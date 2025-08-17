@@ -632,7 +632,7 @@
         this.isLoaded = true;
 
         if (newNotes.length > 0) {
-          this._notifyUpdate(); // Уведомляем UI
+          this._notifyUpdate(newNotes); // Уведомляем UI
         }
       } catch (err) {
         console.error("NoteManager: ошибка обновления", err);
@@ -701,7 +701,7 @@
           file: note.file,
           line: note.line,
         });
-        this._notifyUpdate();
+        this._notifyUpdate([note]);
       } catch (err) {
         console.error("NoteManager: ошибка отправки заметки", err);
         throw new Error(`Не удалось отправить заметку: ${err.message}`);
@@ -724,8 +724,8 @@
       this._updateListeners.push(callback);
     }
 
-    _notifyUpdate() {
-      this._updateListeners.forEach((cb) => cb());
+    _notifyUpdate(notes) {
+      this._updateListeners.forEach((cb) => cb(notes));
     }
   }
 
@@ -760,7 +760,8 @@
     constructor(manager, noteInput) {
       this.manager = manager;
       this.noteInput = noteInput;
-      this._boundProcess = this.processLines.bind(this);
+      this._pendingUpdates = new Set();
+      this._isFrameScheduled = false;
     }
 
     static pinIcon= "📌";
@@ -768,39 +769,88 @@
     static buttonClass = "gh-note-btn";
     static activeButtonClass = "gh-pinned-note-btn";
     static tooltipClass = "gh-notes-tooltip gh-notes-tooltip Box f6 rounded-1 text-normal color-shadow-small";
-    static lineNumSelector = "div[data-line-number].react-line-number";
+    static lineNumSelector = "div[data-line-number].react-line-number.react-code-text";
+    static pendingTimeout = 50;
 
     /**
      * Запускает обработку строк кода
      */
     start() {
-      this.processLines();
-      this.manager.onUpdate(this._boundProcess);
-      new MutationObserver(() => this.processLines()).observe(document.body, {
+      this.manager.onUpdate(notes => this._processNotes(notes));
+
+      const observer = new MutationObserver(mutations => {
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+              continue;
+            }
+            if (node.matches(LineNoteButtons.lineNumSelector)) {
+              this._updateButton(node);
+              continue;
+            }
+            node.querySelectorAll(LineNoteButtons.lineNumSelector).forEach(node => {
+              this._updateButton(node);
+            });
+          }
+        }
+      });
+
+      observer.observe(document.body, {
         childList: true,
         subtree: true,
       });
-    }
 
-    processLines() {
-      document.querySelectorAll(LineNoteButtons.lineNumSelector).forEach((div) => {
-        this.updateButton(div);
+      document.querySelectorAll(LineNoteButtons.lineNumSelector).forEach(line => {
+        this._updateButton(line);
       });
     }
 
-    updateButton(div) {
-      if (!this._isValidLineNumberDiv(div)) return;
+    _processNotes(notes) {
+      const { repo, branch, file } = this._parseUrl();
+      if (!file) return;
 
-      const lineNumber = parseInt(div.getAttribute("data-line-number"), 10);
-      if (isNaN(lineNumber) || lineNumber <= 0) return;
+      const lineNums = new Set;
+      notes.forEach(note => {
+        if (note.repo !== repo || note.branch !== branch || note.file !== file) return;
+        lineNums.add(note.line);
+      });
 
-      let button = div.querySelector(`.${LineNoteButtons.buttonClass}`);
-      if (!button) {
-        button = this._createButton(lineNumber);
-        div.appendChild(button);
-      }
+      document.querySelectorAll(LineNoteButtons.lineNumSelector).forEach((div) => {
+        const lineNumber = parseInt(div.getAttribute("data-line-number"), 10);
+        if (lineNums.has(lineNumber)) this._updateButton(div);
+      });
+    }
 
-      this._updateButtonState(button, lineNumber);
+    _updateButton(div) {
+      this._pendingUpdates.add(div);
+
+      if (this._isFrameScheduled) return;
+      this._isFrameScheduled = true;
+
+      setTimeout(() => {
+        requestAnimationFrame(() => {
+          const aliveElements = [];
+          this._pendingUpdates.forEach(div => {
+            if (div.isConnected) aliveElements.push(div);
+          });
+
+          aliveElements.forEach(div => {
+            const lineNumber = parseInt(div.getAttribute("data-line-number"), 10);
+            if (isNaN(lineNumber) || lineNumber <= 0) return;
+
+            let button = div.querySelector(`.${LineNoteButtons.buttonClass}`);
+            if (!button) {
+              button = this._createButton(lineNumber);
+              div.appendChild(button);
+            }
+
+            this._updateButtonState(button, lineNumber);
+          });
+
+          this._pendingUpdates.clear();
+          this._isFrameScheduled = false;
+        });
+      }, LineNoteButtons.pendingTimeout);
     }
 
     _createButton(lineNumber) {
@@ -942,16 +992,9 @@
 
       try {
         await this.manager.saveNote(note);
-        // Кнопка обновится при следующем processLines()
       } catch (err) {
         alert("Ошибка: " + err.message);
       }
-    }
-
-    _isValidLineNumberDiv(div) {
-      if (!div || !div.classList.contains("react-line-number")) return false;
-      const lineNumber = div.getAttribute("data-line-number");
-      return lineNumber && /^\d+$/.test(lineNumber);
     }
 
     _getContext(line) {
@@ -986,24 +1029,29 @@
      * Запускает отслеживание контекстных меню
      */
     start() {
-      new MutationObserver((mutations) => {
+      const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
-          if (mutation.type !== "childList") continue;
-
-          const addedNodes = Array.from(mutation.addedNodes).filter(
-            (n) => n.nodeType === 1
-          );
-
-          for (const node of addedNodes) {
-            if (node.matches?.(AddNoteMenuItem.menuSelector)) {
+          for (const node of mutation.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+              continue;
+            }
+            if (node.matches(AddNoteMenuItem.menuSelector)) {
               this._onMenuAppeared(node);
-            } else {
-              const menu = node.querySelector?.(AddNoteMenuItem.menuSelector);
-              if (menu) this._onMenuAppeared(menu);
+              return;
+            }
+            const menu = node.querySelector(AddNoteMenuItem.menuSelector);
+            if (menu) {
+              this._onMenuAppeared(menu);
+              return;
             }
           }
         }
-      }).observe(document.body, { childList: true, subtree: true });
+      });
+
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
     }
 
     _onMenuAppeared(menu) {
@@ -1136,6 +1184,9 @@
     return decodeURI(ariaLabel.slice(0, -'branch'.length).trim());
   }
 
+  /**
+   * @return {repo, branch, file}
+   */
   function whereAreWeLocated() {
     // https://github.com/aaa2ppp/repo-name-with-slashes/blob/branch/name/with/slashes/some/long/path/file.code ->
     // {"repo": "aaa2ppp/repo-name-with-slashes", "branch": "branch/name/with/slashes", "file": "some/long/path/file.code"}
